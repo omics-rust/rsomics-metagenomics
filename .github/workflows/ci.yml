@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            oracle: vsearch-2.31.0-linux-x86_64.tar.gz
+            oracle_sha256: 1f07aec19cdeaf2a0ce8d9e3c9e6bb76a5cbf54e86d40bc50cb314a06ace2a16
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            oracle: vsearch-2.31.0-linux-aarch64.tar.gz
+            oracle_sha256: b053c0da34b48b5f05ce16268e46bc6dfe3458ab6c0ba688db786045c7e94f43
+          - target: macos-x86_64
+            runner: macos-15-intel
+            oracle: vsearch-2.31.0-macos-x86_64.tar.gz
+            oracle_sha256: 57f4731a6097ba4e11c07d76c76d3ad5b08710d967cac7d887f120721fad34c1
+          - target: macos-aarch64
+            runner: macos-15
+            oracle: vsearch-2.31.0-macos-aarch64.tar.gz
+            oracle_sha256: 82716dd5448ac87d12e93681579d786407198f7fbbea154d85fd2c61b3487ec5
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: clippy,rustfmt
+      - name: Install VSEARCH 2.31.0 oracle
+        env:
+          VSEARCH_ARCHIVE: ${{ matrix.oracle }}
+          VSEARCH_SHA256: ${{ matrix.oracle_sha256 }}
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/$VSEARCH_ARCHIVE" \
+            "https://github.com/torognes/vsearch/releases/download/v2.31.0/$VSEARCH_ARCHIVE"
+          python3 - "$RUNNER_TEMP/$VSEARCH_ARCHIVE" "$VSEARCH_SHA256" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          archive = pathlib.Path(sys.argv[1])
+          expected = sys.argv[2]
+          actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit(f"VSEARCH checksum mismatch: {actual} != {expected}")
+          PY
+          tar -xzf "$RUNNER_TEMP/$VSEARCH_ARCHIVE" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/${VSEARCH_ARCHIVE%.tar.gz}/bin" >> "$GITHUB_PATH"
+      - if: matrix.target == 'linux-x86_64'
+        run: cargo fmt --all -- --check
+      - if: matrix.target == 'linux-x86_64'
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - if: matrix.target == 'linux-x86_64'
+        run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - if: matrix.target == 'linux-x86_64'
+        run: cargo package --locked
+      - run: vsearch --version
+      - run: cargo test --locked --all-targets --all-features
+      - run: cargo test --release --locked --all-targets --all-features
