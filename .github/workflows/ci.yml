@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: '2'
+  PYTHONDONTWRITEBYTECODE: '1'
+  OMP_NUM_THREADS: '4'
+
 jobs:
   native:
     name: ${{ matrix.target }}
@@ -19,26 +24,78 @@ jobs:
         include:
           - target: linux-x86_64
             runner: ubuntu-24.04
+            host: x86_64-unknown-linux-gnu
             oracle: vsearch-2.31.0-linux-x86_64.tar.gz
             oracle_sha256: 1f07aec19cdeaf2a0ce8d9e3c9e6bb76a5cbf54e86d40bc50cb314a06ace2a16
           - target: linux-aarch64
             runner: ubuntu-24.04-arm
+            host: aarch64-unknown-linux-gnu
             oracle: vsearch-2.31.0-linux-aarch64.tar.gz
             oracle_sha256: b053c0da34b48b5f05ce16268e46bc6dfe3458ab6c0ba688db786045c7e94f43
           - target: macos-x86_64
             runner: macos-15-intel
+            host: x86_64-apple-darwin
             oracle: vsearch-2.31.0-macos-x86_64.tar.gz
             oracle_sha256: 57f4731a6097ba4e11c07d76c76d3ad5b08710d967cac7d887f120721fad34c1
           - target: macos-aarch64
             runner: macos-15
+            host: aarch64-apple-darwin
             oracle: vsearch-2.31.0-macos-aarch64.tar.gz
             oracle_sha256: 82716dd5448ac87d12e93681579d786407198f7fbbea154d85fd2c61b3487ec5
 
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare runner storage
+        shell: bash
+        run: |
+          for pair in CARGO_HOME=cargo-home CARGO_TARGET_DIR=cargo-target RUSTUP_HOME=rustup-home TMPDIR=scratch XDG_CACHE_HOME=cache; do
+            name="${pair%%=*}"
+            path="$RUNNER_TEMP/${pair#*=}"
+            mkdir -p "$path"
+            printf '%s=%s\n' "$name" "$path" >> "$GITHUB_ENV"
+          done
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
           components: clippy,rustfmt
+      - name: Verify native compiler and build target directory
+        env:
+          EXPECTED_HOST: ${{ matrix.host }}
+        run: |
+          rustc -Vv
+          test "$(rustc -Vv | sed -n 's/^host: //p')" = "$EXPECTED_HOST"
+          cargo metadata --locked --no-deps --format-version 1 | python3 -B -c 'import json,os,sys; assert json.load(sys.stdin)["target_directory"] == os.environ["CARGO_TARGET_DIR"]'
+      - name: Build Kraken 2.17.1 oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://codeload.github.com/DerrickWood/kraken2/tar.gz/5e2aa928d00b96d61f204d517437637863da1d8c -o "$RUNNER_TEMP/kraken2-source.tar.gz"
+          python3 -B - "$RUNNER_TEMP" <<'PY'
+          import hashlib, pathlib, sys, tarfile
+          root = pathlib.Path(sys.argv[1])
+          source = root / 'kraken2-source.tar.gz'
+          assert hashlib.sha256(source.read_bytes()).hexdigest() == '8cf3eeca9078d40a5d07af00dbc87a56a0c1cc11d09ee36442388a0a710052e9'
+          with tarfile.open(source) as archive:
+              members = archive.getmembers()
+              assert len(members) == 103 and sum(m.size for m in members) < 2_000_000
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  assert not path.is_absolute() and '..' not in path.parts and path.parts[0] == 'kraken2-5e2aa928d00b96d61f204d517437637863da1d8c'
+                  assert member.isfile() or member.isdir()
+              archive.extractall(root)
+          PY
+          source="$RUNNER_TEMP/kraken2-5e2aa928d00b96d61f204d517437637863da1d8c"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            brew install libomp
+            export CXX=clang++ CC=clang
+            export KRAKEN2_SKIP_FOPENMP="-Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include"
+            export LDFLAGS="-L$(brew --prefix libomp)/lib -lomp"
+          else
+            sudo apt-get update
+            sudo apt-get install --yes g++ make zlib1g-dev
+          fi
+          MAKEFLAGS=-j2 sh "$source/install_kraken2.sh" "$RUNNER_TEMP/kraken2-oracle"
+          "$RUNNER_TEMP/kraken2-oracle/kraken2" --version | grep -Fx 'Kraken version 2.17.1'
+          echo "RSOMICS_KRAKEN2_DIR=$RUNNER_TEMP/kraken2-oracle" >> "$GITHUB_ENV"
       - name: Install VSEARCH 2.31.0 oracle
         env:
           VSEARCH_ARCHIVE: ${{ matrix.oracle }}
