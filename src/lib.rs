@@ -2,3 +2,4 @@
 #![allow(clippy::missing_errors_doc)]
 
 pub mod amplicon;
+pub mod classifier;

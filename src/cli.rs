@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+mod classifier;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rsomics_common::{
     Context, OutputArgs, Result, RsomicsError, ToolMeta, reject_output_alias, write_output,
@@ -23,7 +25,7 @@ pub const META: ToolMeta = ToolMeta {
 #[command(
     name = "rsomics-metagenomics",
     version,
-    about = "Run abundance-aware amplicon workflows",
+    about = "Run amplicon and taxonomic classification workflows",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -42,6 +44,12 @@ enum Command {
     SortAbundance(SortArgs),
     /// Expand abundance-labelled amplicons into individual records.
     Rereplicate(RereplicateArgs),
+    /// Build or inspect a native taxonomic database.
+    Database(classifier::DatabaseArgs),
+    /// Classify single-end reads against a native database.
+    Classify(classifier::ClassifyArgs),
+    /// Summarize classifications as a standard taxonomic report.
+    Report(classifier::ReportArgs),
 }
 
 impl Command {
@@ -50,6 +58,9 @@ impl Command {
             Self::Dereplicate(args) => args.io.output.as_deref(),
             Self::SortAbundance(args) => args.io.output.as_deref(),
             Self::Rereplicate(args) => args.io.output.as_deref(),
+            Self::Database(_) => None,
+            Self::Classify(args) => args.output.as_deref(),
+            Self::Report(args) => args.output.as_deref(),
         }
     }
 }
@@ -200,7 +211,7 @@ struct RereplicateArgs {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ExecutionReport {
+pub struct AmpliconReport {
     operation: &'static str,
     input_records: usize,
     output_records: u64,
@@ -209,22 +220,37 @@ pub struct ExecutionReport {
     output: String,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ExecutionReport {
+    Amplicon(AmpliconReport),
+    Classifier(classifier::Report),
+}
+
 impl Cli {
     pub fn execute(self) -> Result<ExecutionReport> {
-        if self.output.json && is_stdout(self.command.output()) {
+        if self.output.json
+            && !matches!(self.command, Command::Database(_))
+            && is_stdout(self.command.output())
+        {
             return Err(RsomicsError::ConfigError(
-                "--json requires a named FASTA output".into(),
+                "--json requires a named data output".into(),
             ));
         }
         match self.command {
-            Command::Dereplicate(args) => execute_dereplicate(args),
-            Command::SortAbundance(args) => execute_sort(args),
-            Command::Rereplicate(args) => execute_rereplicate(args),
+            Command::Dereplicate(args) => execute_dereplicate(args).map(ExecutionReport::Amplicon),
+            Command::SortAbundance(args) => execute_sort(args).map(ExecutionReport::Amplicon),
+            Command::Rereplicate(args) => execute_rereplicate(args).map(ExecutionReport::Amplicon),
+            Command::Database(args) => args
+                .execute(self.output.json)
+                .map(ExecutionReport::Classifier),
+            Command::Classify(args) => args.execute().map(ExecutionReport::Classifier),
+            Command::Report(args) => args.execute().map(ExecutionReport::Classifier),
         }
     }
 }
 
-fn execute_dereplicate(args: DereplicateArgs) -> Result<ExecutionReport> {
+fn execute_dereplicate(args: DereplicateArgs) -> Result<AmpliconReport> {
     reject_alias(&args.io)?;
     let profile = args.profile.into();
     let options = DereplicateOptions {
@@ -240,7 +266,7 @@ fn execute_dereplicate(args: DereplicateArgs) -> Result<ExecutionReport> {
     let result = dereplicate_input(&args.io.input, &options)?;
     let width = line_width(args.line_width, profile);
     write_amplicons(result.records(), args.io.output.as_deref(), width)?;
-    Ok(ExecutionReport {
+    Ok(AmpliconReport {
         operation: "dereplicate",
         input_records: result.input_records(),
         output_records: result.records().len() as u64,
@@ -253,7 +279,7 @@ fn execute_dereplicate(args: DereplicateArgs) -> Result<ExecutionReport> {
     })
 }
 
-fn execute_sort(args: SortArgs) -> Result<ExecutionReport> {
+fn execute_sort(args: SortArgs) -> Result<AmpliconReport> {
     reject_alias(&args.io)?;
     let profile = args.profile.into();
     let records = read_input(&args.io.input, profile)?;
@@ -270,7 +296,7 @@ fn execute_sort(args: SortArgs) -> Result<ExecutionReport> {
     )?;
     let width = line_width(args.line_width, profile);
     write_amplicons(result.records(), args.io.output.as_deref(), width)?;
-    Ok(ExecutionReport {
+    Ok(AmpliconReport {
         operation: "sort-abundance",
         input_records: result.input_records(),
         output_records: result.records().len() as u64,
@@ -282,7 +308,7 @@ fn execute_sort(args: SortArgs) -> Result<ExecutionReport> {
     })
 }
 
-fn execute_rereplicate(args: RereplicateArgs) -> Result<ExecutionReport> {
+fn execute_rereplicate(args: RereplicateArgs) -> Result<AmpliconReport> {
     reject_alias(&args.io)?;
     let profile = args.profile.into();
     let records = read_input(&args.io.input, profile)?;
@@ -297,7 +323,7 @@ fn execute_rereplicate(args: RereplicateArgs) -> Result<ExecutionReport> {
         },
     )?;
     write_output(args.io.output.as_deref(), |writer| plan.write(writer))?;
-    Ok(ExecutionReport {
+    Ok(AmpliconReport {
         operation: "rereplicate",
         input_records: plan.input_records(),
         output_records: plan.output_records(),
