@@ -1,7 +1,7 @@
 [package]
 name = "rsomics-metagenomics"
-version = "0.1.0"
-description = "Abundance-aware amplicon processing workflows"
+version = "0.2.0"
+description = "Amplicon processing and compact taxonomic classification workflows"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/rsomics-metagenomics"
 authors = ["Zane Leong <efd@live.com>"]
 readme = "README.md"
 categories = ["science", "command-line-utilities"]
-keywords = ["metagenomics", "amplicon", "dereplication", "fasta", "bioinformatics"]
+keywords = ["metagenomics", "amplicon", "taxonomy", "fasta", "bioinformatics"]
 
 [lib]
 name = "rsomics_metagenomics"
