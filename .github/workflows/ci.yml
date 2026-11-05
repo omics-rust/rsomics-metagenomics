@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  DELIVERY_HELPER_REVISION: f580be8705678234fd4b1abdcf9e56860f43b33f
+  DELIVERY_HELPER_REVISION: 46f68f15c2d0e83a71979cc5f51d105d3ddb6c01
   CARGO_BUILD_JOBS: '2'
   PYTHONDONTWRITEBYTECODE: '1'
   OMP_NUM_THREADS: '4'
@@ -200,7 +200,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rsomics-metagenomics-delivery-${{ matrix.target }}-${{ github.sha }}
+          name: rsomics-metagenomics-delivery-${{ matrix.target }}-${{ github.sha }}-a${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/delivery/*.crate
             ${{ runner.temp }}/delivery/*.tar.gz
@@ -211,5 +211,66 @@ jobs:
             ${{ runner.temp }}/delivery/package.std*
             ${{ runner.temp }}/delivery/install.std*
             ${{ runner.temp }}/delivery/release-tests.log
+          if-no-files-found: error
+          retention-days: 90
+
+  audit-originals:
+    name: Verify original delivery artifacts
+    needs: native
+    if: >-
+      github.repository == 'omics-rust/rsomics-metagenomics' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: omics-rust/rsomics-world
+          ref: ${{ env.DELIVERY_HELPER_REVISION }}
+          path: target/ci/control-plane
+          sparse-checkout: |
+            scripts/native_delivery.py
+            scripts/audit_native_delivery.py
+            scripts/stage_native_release.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - name: Verify exact delivery helper
+        run: test "$(git -C target/ci/control-plane rev-parse HEAD)" = "$DELIVERY_HELPER_REVISION"
+      - name: Verify uploaded native ZIPs
+        env:
+          ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -B target/ci/control-plane/scripts/audit_native_delivery.py \
+            --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/native-audit" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsomics-metagenomics-native-audit-${{ github.sha }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-audit/AUDITED.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stage verified release files
+        run: |
+          set -euo pipefail
+          staged="$RUNNER_TEMP/release-stage"
+          receipt=$(python3 -B target/ci/control-plane/scripts/stage_native_release.py \
+            --audit "$RUNNER_TEMP/native-audit" --out "$staged")
+          (cd "$staged" && sha256sum --check --strict SHA256SUMS)
+          printf 'Staged receipt SHA-256: `%s`\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsomics-metagenomics-release-stage-${{ github.sha }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-stage/
           if-no-files-found: error
           retention-days: 90
